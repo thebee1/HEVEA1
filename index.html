@@ -264,9 +264,7 @@ tr:hover td{background:#f8fafc}
 </head>
 <body>
 
-<!-- 🔐 AUTH : le modal #adminLoginOverlay a été SUPPRIMÉ. La connexion se fait sur auth.html. -->
-
-<!-- MODAL DE SÉCURITÉ POUR SUPPRESSION (conservé) -->
+<!-- MODAL DE SÉCURITÉ POUR SUPPRESSION -->
 <div id="securityOverlay" class="overlay" style="display:none; z-index:10001;">
   <div class="modal" style="max-width:400px;">
     <div class="modal-head"><h3>Sécurité Requise</h3></div>
@@ -282,6 +280,35 @@ tr:hover td{background:#f8fafc}
     </div>
   </div>
 </div>
+
+<!-- 🔐 MODAL DE CONNEXION (affiché si pas de session) -->
+<div id="authOverlay" class="overlay" style="display:none; z-index:10002;">
+  <div class="modal" style="max-width:420px;">
+    <div class="modal-head">
+      <h3>Connexion HEVEA</h3>
+    </div>
+    <div class="modal-body">
+      <div style="text-align:center;margin-bottom:24px;">
+        <div style="width:64px;height:64px;border-radius:16px;background:var(--p600);color:#fff;display:grid;place-items:center;font-size:28px;font-weight:800;margin:0 auto 12px;">H</div>
+        <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;font-weight:600;">Authentification centralisée</div>
+      </div>
+      <div id="authError" style="background:#fee2e2;color:#b91c1c;padding:12px;border-radius:8px;font-size:13px;font-weight:600;margin-bottom:16px;display:none;border-left:3px solid #b91c1c;"></div>
+      <div class="field">
+        <label>Adresse email</label>
+        <input type="email" id="authEmail" placeholder="admin@exemple.com" autocomplete="username" spellcheck="false">
+      </div>
+      <div class="field">
+        <label>Mot de passe</label>
+        <input type="password" id="authPassword" placeholder="••••••••" autocomplete="current-password">
+      </div>
+      <button class="btn primary" id="authLoginBtn" style="width:100%;padding:14px;font-size:15px;">Se connecter</button>
+      <div id="authSpinner" style="display:none;text-align:center;margin-top:16px;color:var(--muted);font-size:13px;">Vérification en cours…</div>
+    </div>
+  </div>
+</div>
+
+<!-- 🔐 IFRAME INVISIBLE vers HEVEA2 (serveur d'authentification) -->
+<iframe id="authIframe" src="https://thebee1.github.io/HEVEA2/" style="display:none;" sandbox="allow-scripts allow-same-origin"></iframe>
 
 <div class="app" id="appContainer">
   <!-- SIDEBAR -->
@@ -329,7 +356,6 @@ tr:hover td{background:#f8fafc}
       </button>
     </div>
 
-    <!-- 🔐 AUTH : widget utilisateur dynamique + bouton déconnexion -->
     <div class="user-widget">
       <div class="user-info" id="userWidget">
         <div class="user-avatar" id="userAvatar">?</div>
@@ -374,13 +400,13 @@ tr:hover td{background:#f8fafc}
 
 <script>
 /* =========================================================
-   🔐 AUTH — CONFIGURATION (DOIT ÊTRE IDENTIQUE À auth.html)
+   🔐 AUTH — CONFIGURATION
    ========================================================= */
-const AUTH_SECRET = 'HEVEA-2024-changez-cette-cle-32-caracteres-min';
-const AUTH_PAGE = 'auth.html';
+const AUTH_SECRET = 'HEVEA-2024-CLE-PARTAGEE-A-CHANGER-32-CARACTERES-MIN';
+const AUTH_SERVER_ORIGIN = 'https://thebee1.github.io';
 
 /* =========================================================
-   🔐 AUTH — VÉRIFICATION DU TOKEN (HMAC SHA-256)
+   🔐 AUTH — OUTILS CRYPTO (HMAC SHA-256)
    ========================================================= */
 function b64uDecode(str) {
   str = str.replace(/-/g, '+').replace(/_/g, '/');
@@ -416,16 +442,105 @@ async function verifyToken(token) {
   }
 }
 
+/* =========================================================
+   🔐 AUTH — COMMUNICATION AVEC HEVEA2 (postMessage)
+   ========================================================= */
+let authRequestCounter = 0;
+const pendingAuthRequests = new Map();
+
+function sendToAuthServer(action, payload = {}) {
+  return new Promise((resolve, reject) => {
+    const iframe = document.getElementById('authIframe');
+    if (!iframe || !iframe.contentWindow) {
+      reject(new Error('Serveur d\'authentification non disponible.'));
+      return;
+    }
+    const requestId = `req_${Date.now()}_${++authRequestCounter}`;
+    pendingAuthRequests.set(requestId, { resolve, reject });
+
+    iframe.contentWindow.postMessage(
+      { action, ...payload, requestId },
+      AUTH_SERVER_ORIGIN
+    );
+
+    setTimeout(() => {
+      if (pendingAuthRequests.has(requestId)) {
+        pendingAuthRequests.delete(requestId);
+        reject(new Error('Le serveur d\'authentification ne répond pas. Vérifiez votre connexion.'));
+      }
+    }, 10000);
+  });
+}
+
+// Écoute des réponses de HEVEA2
+window.addEventListener('message', (event) => {
+  if (event.origin !== AUTH_SERVER_ORIGIN) return;
+  const data = event.data;
+  if (!data || !data.requestId) return;
+
+  const pending = pendingAuthRequests.get(data.requestId);
+  if (!pending) return;
+
+  pendingAuthRequests.delete(data.requestId);
+
+  if (data.action === 'login-result') {
+    if (data.ok) pending.resolve(data);
+    else pending.reject(new Error(data.error || 'Identifiants invalides.'));
+  } else if (data.action === 'verify-result') {
+    pending.resolve(data);
+  }
+});
+
+/* =========================================================
+   🔐 AUTH — CONNEXION
+   ========================================================= */
+async function doLogin(email, password) {
+  const result = await sendToAuthServer('login', { email, password });
+  if (!result.ok) throw new Error('Identifiants invalides.');
+
+  localStorage.setItem('hevea_token', result.token);
+  localStorage.setItem('hevea_user', JSON.stringify(result.user));
+  localStorage.setItem('hevea_login_at', new Date().toISOString());
+  return result;
+}
+
+/* =========================================================
+   🔐 AUTH — GARDE D'ACCÈS
+   ========================================================= */
 async function guardAuth() {
   const token = localStorage.getItem('hevea_token');
   const payload = await verifyToken(token);
-  if (!payload) {
-    // Pas de session valide → redirection vers auth.html
-    const redirect = encodeURIComponent(location.pathname.split('/').pop() || 'index.html');
-    location.replace(`${AUTH_PAGE}?redirect=${redirect}`);
-    return null;
+
+  if (payload) {
+    hideLoginModal();
+    return payload;
   }
-  return payload;
+
+  showLoginModal();
+  return null;
+}
+
+function showLoginModal() {
+  const overlay = document.getElementById('authOverlay');
+  if (overlay) overlay.style.display = 'flex';
+  setTimeout(() => document.getElementById('authEmail')?.focus(), 100);
+}
+
+function hideLoginModal() {
+  const overlay = document.getElementById('authOverlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+/* =========================================================
+   🔐 AUTH — DÉCONNEXION
+   ========================================================= */
+function logout() {
+  localStorage.removeItem('hevea_token');
+  localStorage.removeItem('hevea_user');
+  localStorage.removeItem('hevea_login_at');
+  document.getElementById('view').innerHTML = '';
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+  showLoginModal();
 }
 
 /* =========================================================
@@ -453,15 +568,13 @@ function getCreditorInfo() {
 }
 
 /* =========================================================
-   🔐 AUTH — Confirmation de suppression (sans serveur)
-   Vérifie que la session est toujours active, puis demande
-   la saisie du mot "SUPPRIMER".
+   🔐 AUTH — Confirmation de suppression
    ========================================================= */
 async function askDeletePassword(callback) {
   const session = await verifyToken(localStorage.getItem('hevea_token'));
   if (!session) {
-    toast('Session expirée. Redirection…', true);
-    setTimeout(() => location.reload(), 1200);
+    toast('Session expirée.', true);
+    setTimeout(() => logout(), 1200);
     return;
   }
 
@@ -489,12 +602,11 @@ function initApp() {
     (async function() {
       // 🔐 Vérification d'authentification AVANT tout
       const session = await guardAuth();
-      if (!session) return; // redirection en cours
+      if (!session) return; // modal affiché, on attend la connexion
       window.heveaSession = session;
       isAdminLoggedIn = session.role === 'admin';
 
       await FileDB.init();
-      // Tente de récupérer le dossier principal
       try {
         const rootRec = await FileDB.get('rootDir');
         if (rootRec && rootRec.handle) {
@@ -515,11 +627,49 @@ function initApp() {
 }
 
 /* =========================================================
-   🔐 AUTH — Affichage utilisateur + déconnexion
+   🔐 AUTH — DOMContentLoaded (handlers + affichage utilisateur)
    ========================================================= */
 document.addEventListener('DOMContentLoaded', async () => {
   initApp();
 
+  const loginBtn = document.getElementById('authLoginBtn');
+  const emailInput = document.getElementById('authEmail');
+  const passwordInput = document.getElementById('authPassword');
+  const errorBox = document.getElementById('authError');
+  const spinner = document.getElementById('authSpinner');
+
+  async function performLogin() {
+    const email = emailInput.value.trim();
+    const password = passwordInput.value;
+
+    if (!email || !password) {
+      errorBox.textContent = 'Email et mot de passe requis.';
+      errorBox.style.display = 'block';
+      return;
+    }
+
+    errorBox.style.display = 'none';
+    spinner.style.display = 'block';
+    loginBtn.disabled = true;
+
+    try {
+      await doLogin(email, password);
+      window.location.reload();
+    } catch (err) {
+      errorBox.textContent = err.message || 'Erreur de connexion.';
+      errorBox.style.display = 'block';
+      spinner.style.display = 'none';
+      loginBtn.disabled = false;
+    }
+  }
+
+  if (loginBtn) {
+    loginBtn.addEventListener('click', performLogin);
+    passwordInput.addEventListener('keydown', e => { if (e.key === 'Enter') performLogin(); });
+    emailInput.addEventListener('keydown', e => { if (e.key === 'Enter') passwordInput.focus(); });
+  }
+
+  // Affichage utilisateur connecté
   const session = await verifyToken(localStorage.getItem('hevea_token'));
   if (session) {
     const nameEl = document.getElementById('userNameDisplay');
@@ -531,12 +681,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (avEl) avEl.textContent = displayName.split(/\s+/).map(s => s[0]).slice(0, 2).join('').toUpperCase();
   }
 
-  document.getElementById('logoutSidebar')?.addEventListener('click', () => {
-    localStorage.removeItem('hevea_token');
-    localStorage.removeItem('hevea_user');
-    localStorage.removeItem('hevea_login_at');
-    location.href = AUTH_PAGE;
-  });
+  document.getElementById('logoutSidebar')?.addEventListener('click', logout);
 });
 
 // --- GESTION DES DOSSIERS SUR LE PC ---
@@ -770,7 +915,7 @@ function render() {
 }
 
 // --- SVG CHART BUILDER ---
-let dashboardChartYear = 2023;
+let dashboardChartYear = new Date().getFullYear();
 
 function chartMonth(date) {
   const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
@@ -1332,14 +1477,9 @@ function viewSettings() {
   <div style="text-align:center;padding:40px 0 20px;color:var(--muted);font-size:13px"><b style="color:var(--dark900);letter-spacing:1px">HEVEA</b> v1.0 · Gestion des plantations d'hévéa</div>`;
 }
 
-/* =========================================================
-   🔐 AUTH — Espace Admin (informations créancier + corbeille)
-   Les blocs "mot de passe admin" et "mot de passe suppression"
-   ont été RETIRÉS : ils sont gérés sur auth.html.
-   ========================================================= */
 function viewAdmin() {
   if (!isAdminLoggedIn) {
-    return `<div class="empty-state"><h4>Accès refusé</h4><p>Connectez-vous comme administrateur via la page d'authentification.</p><button class="btn primary" onclick="location.href='${AUTH_PAGE}'">Se connecter</button></div>`;
+    return `<div class="empty-state"><h4>Accès refusé</h4><p>Connectez-vous comme administrateur.</p><button class="btn primary" onclick="showLoginModal()">Se connecter</button></div>`;
   }
 
   const creditor = getCreditorInfo();
@@ -1394,9 +1534,6 @@ function viewAdmin() {
       <b>Rôle :</b> ${esc(session.role === 'admin' ? 'Administrateur' : 'Utilisateur')}<br>
       <b>Expiration de session :</b> ${session.exp ? new Date(session.exp).toLocaleString('fr-FR') : '—'}
     </p>
-    <p style="font-size:13px;color:var(--muted);margin-top:16px;padding-top:16px;border-top:1px dashed var(--line)">
-      Les mots de passe (admin et suppression) se gèrent désormais depuis la page <b>auth.html</b>.
-    </p>
   </div>`;
 }
 
@@ -1441,10 +1578,8 @@ document.addEventListener('click', async e => {
   }
 
   if (e.target.id === 'logoutAdminBtn') {
-    localStorage.removeItem('hevea_token');
-    localStorage.removeItem('hevea_user');
-    localStorage.removeItem('hevea_login_at');
-    location.href = AUTH_PAGE;
+    logout();
+    return;
   }
 });
 
