@@ -303,12 +303,40 @@ tr:hover td{background:#f8fafc}
       </div>
       <button class="btn primary" id="authLoginBtn" style="width:100%;padding:14px;font-size:15px;">Se connecter</button>
       <div id="authSpinner" style="display:none;text-align:center;margin-top:16px;color:var(--muted);font-size:13px;">Vérification en cours…</div>
+      <button class="btn ghost" id="openRegistrationBtn" type="button" style="width:100%;margin-top:12px;">Créer un compte</button>
+    </div>
+  </div>
+</div>
+
+<div id="registrationOverlay" class="overlay" style="display:none; z-index:10003;">
+  <div class="modal" style="max-width:420px;">
+    <div class="modal-head"><h3>Créer un compte HEVEA</h3></div>
+    <div class="modal-body">
+      <div id="registrationMessage" style="display:none;padding:12px;border-radius:8px;font-size:13px;font-weight:600;margin-bottom:16px;"></div>
+      <div class="field">
+        <label>Nom complet</label>
+        <input type="text" id="registrationName" autocomplete="name" maxlength="80">
+      </div>
+      <div class="field">
+        <label>Adresse email</label>
+        <input type="email" id="registrationEmail" autocomplete="email" spellcheck="false">
+      </div>
+      <div class="field">
+        <label>Mot de passe (8 caractères minimum)</label>
+        <input type="password" id="registrationPassword" autocomplete="new-password" minlength="8">
+      </div>
+      <div class="field">
+        <label>Confirmer le mot de passe</label>
+        <input type="password" id="registrationPasswordConfirm" autocomplete="new-password" minlength="8">
+      </div>
+      <button class="btn primary" id="registrationSubmitBtn" type="button" style="width:100%;padding:14px;">Envoyer la demande</button>
+      <button class="btn ghost" id="closeRegistrationBtn" type="button" style="width:100%;margin-top:10px;">Retour à la connexion</button>
     </div>
   </div>
 </div>
 
 <!-- 🔐 IFRAME INVISIBLE vers HEVEA2 (serveur d'authentification) -->
-<iframe id="authIframe" src="https://thebee1.github.io/HEVEA2/" style="display:none;" sandbox="allow-scripts allow-same-origin"></iframe>
+<iframe id="authIframe" src="about:blank" style="display:none;" sandbox="allow-scripts allow-same-origin"></iframe>
 
 <div class="app" id="appContainer">
   <!-- SIDEBAR -->
@@ -403,7 +431,8 @@ tr:hover td{background:#f8fafc}
    🔐 AUTH — CONFIGURATION
    ========================================================= */
 const AUTH_SECRET = 'HEVEA-2024-CLE-PARTAGEE-A-CHANGER-32-CARACTERES-MIN';
-const AUTH_SERVER_ORIGIN = 'https://thebee1.github.io';
+const AUTH_SERVER_URL = 'https://thebee1.github.io/HEVEA2/';
+const AUTH_SERVER_ORIGIN = new URL(AUTH_SERVER_URL).origin;
 
 /* =========================================================
    🔐 AUTH — OUTILS CRYPTO (HMAC SHA-256)
@@ -447,22 +476,32 @@ async function verifyToken(token) {
    ========================================================= */
 let authRequestCounter = 0;
 const pendingAuthRequests = new Map();
+let markAuthServerReady;
+let authServerReady = false;
+const authServerReadyPromise = new Promise(resolve => {
+  markAuthServerReady = resolve;
+});
 
-function sendToAuthServer(action, payload = {}) {
+async function sendToAuthServer(action, payload = {}) {
+  const iframe = document.getElementById('authIframe');
+  if (!iframe || !iframe.contentWindow) {
+    throw new Error('Serveur d\'authentification non disponible.');
+  }
+  if (!authServerReady) {
+    await Promise.race([
+      authServerReadyPromise,
+      new Promise((_, reject) => setTimeout(() =>
+        reject(new Error('Le serveur d’authentification ne répond pas. Vérifiez votre connexion.')), 10000))
+    ]);
+  }
+
   return new Promise((resolve, reject) => {
-    const iframe = document.getElementById('authIframe');
-    if (!iframe || !iframe.contentWindow) {
-      reject(new Error('Serveur d\'authentification non disponible.'));
-      return;
-    }
     const requestId = `req_${Date.now()}_${++authRequestCounter}`;
     pendingAuthRequests.set(requestId, { resolve, reject });
-
     iframe.contentWindow.postMessage(
       { action, ...payload, requestId },
       AUTH_SERVER_ORIGIN
     );
-
     setTimeout(() => {
       if (pendingAuthRequests.has(requestId)) {
         pendingAuthRequests.delete(requestId);
@@ -474,8 +513,14 @@ function sendToAuthServer(action, payload = {}) {
 
 // Écoute des réponses de HEVEA2
 window.addEventListener('message', (event) => {
-  if (event.origin !== AUTH_SERVER_ORIGIN) return;
+  const iframe = document.getElementById('authIframe');
+  if (event.origin !== AUTH_SERVER_ORIGIN || event.source !== iframe?.contentWindow) return;
   const data = event.data;
+  if (data && data.action === 'auth-ready') {
+    authServerReady = true;
+    markAuthServerReady();
+    return;
+  }
   if (!data || !data.requestId) return;
 
   const pending = pendingAuthRequests.get(data.requestId);
@@ -483,13 +528,16 @@ window.addEventListener('message', (event) => {
 
   pendingAuthRequests.delete(data.requestId);
 
-  if (data.action === 'login-result') {
+  if (data.action === 'login-result' || data.action === 'registration-result') {
     if (data.ok) pending.resolve(data);
     else pending.reject(new Error(data.error || 'Identifiants invalides.'));
   } else if (data.action === 'verify-result') {
     pending.resolve(data);
   }
 });
+
+// Attach the message listener before loading the remote page so auth-ready cannot be missed.
+document.getElementById('authIframe').src = AUTH_SERVER_URL;
 
 /* =========================================================
    🔐 AUTH — CONNEXION
@@ -637,6 +685,62 @@ document.addEventListener('DOMContentLoaded', async () => {
   const passwordInput = document.getElementById('authPassword');
   const errorBox = document.getElementById('authError');
   const spinner = document.getElementById('authSpinner');
+  const registrationOverlay = document.getElementById('registrationOverlay');
+  const registrationMessage = document.getElementById('registrationMessage');
+  const registrationSubmitBtn = document.getElementById('registrationSubmitBtn');
+
+  document.getElementById('openRegistrationBtn').addEventListener('click', () => {
+    errorBox.style.display = 'none';
+    document.getElementById('authOverlay').style.display = 'none';
+    registrationMessage.style.display = 'none';
+    registrationOverlay.style.display = 'flex';
+    document.getElementById('registrationName').focus();
+  });
+
+  document.getElementById('closeRegistrationBtn').addEventListener('click', () => {
+    registrationOverlay.style.display = 'none';
+    document.getElementById('authOverlay').style.display = 'flex';
+  });
+
+  registrationSubmitBtn.addEventListener('click', async () => {
+    const name = document.getElementById('registrationName').value.trim();
+    const email = document.getElementById('registrationEmail').value.trim();
+    const password = document.getElementById('registrationPassword').value;
+    const confirmation = document.getElementById('registrationPasswordConfirm').value;
+    const showRegistrationMessage = (message, isError = false) => {
+      registrationMessage.textContent = message;
+      registrationMessage.style.background = isError ? '#fee2e2' : '#e0f0e7';
+      registrationMessage.style.color = isError ? '#b91c1c' : '#1b7651';
+      registrationMessage.style.display = 'block';
+    };
+
+    if (!name || !email || !password) {
+      showRegistrationMessage('Tous les champs sont obligatoires.', true);
+      return;
+    }
+    if (password.length < 8) {
+      showRegistrationMessage('Le mot de passe doit contenir au moins 8 caractères.', true);
+      return;
+    }
+    if (password !== confirmation) {
+      showRegistrationMessage('Les mots de passe ne correspondent pas.', true);
+      return;
+    }
+
+    registrationSubmitBtn.disabled = true;
+    registrationSubmitBtn.textContent = 'Envoi en cours…';
+    try {
+      await sendToAuthServer('register', { name, email, password });
+      showRegistrationMessage('Demande envoyée. Un administrateur doit approuver votre compte avant la connexion.');
+      document.getElementById('registrationPassword').value = '';
+      document.getElementById('registrationPasswordConfirm').value = '';
+    } catch (error) {
+      showRegistrationMessage(error.message || 'Impossible d’envoyer la demande.', true);
+    } finally {
+      registrationSubmitBtn.disabled = false;
+      registrationSubmitBtn.textContent = 'Envoyer la demande';
+    }
+  });
 
   async function performLogin() {
     const email = emailInput.value.trim();
